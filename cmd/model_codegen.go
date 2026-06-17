@@ -21,6 +21,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"unsafe"
 
 	"github.com/microsoft/typescript-go/shim/ast"
 	"github.com/microsoft/typescript-go/shim/bundled"
@@ -343,6 +344,29 @@ func (g *modelGen) print(t *checker.Type, atNode *ast.Node, side string) string 
 		}
 		return strings.Join(out, " | ")
 	}
+	// tuple (e.g. NonEmptyArray -> readonly [E, ...E[]]) -> walk elements so nested
+	// models become `Name.Encoded`/`Name.Type` (TypeToString prints them unqualified).
+	if checker.IsTupleType(t) {
+		args := checker.Checker_getTypeArguments(g.ch, t)
+		flags := tupleElementFlags(t)
+		parts := make([]string, len(args))
+		for i, a := range args {
+			el := g.print(a, atNode, side)
+			var f checker.ElementFlags
+			if i < len(flags) {
+				f = flags[i]
+			}
+			switch {
+			case f&checker.ElementFlagsRest != 0:
+				parts[i] = "..." + asElement(el) + "[]"
+			case f&checker.ElementFlagsOptional != 0:
+				parts[i] = el + "?"
+			default:
+				parts[i] = el
+			}
+		}
+		return "readonly [" + strings.Join(parts, ", ") + "]"
+	}
 	// array -> readonly E[]
 	if checker.Checker_isArrayType(g.ch, t) {
 		args := checker.Checker_getTypeArguments(g.ch, t)
@@ -372,6 +396,37 @@ func (g *modelGen) print(t *checker.Type, atNode *ast.Node, side string) string 
 		return namedScalar(printed)
 	}
 	return printed
+}
+
+// typescript-go keeps per-tuple-element flags (rest/optional/fixed) in an
+// unexported field. We read them via an exact struct mirror + unsafe.Pointer --
+// the same technique tsgolint's own shim uses (TupleType_combinedFlags). Layout
+// is fixed by the pinned typescript-go commit. Returns one flag per element.
+type extraTupleType struct {
+	checker.InterfaceType
+	elementInfos  []checker.TupleElementInfo
+	minLength     int
+	fixedLength   int
+	combinedFlags checker.ElementFlags
+	readonly      bool
+}
+
+type extraTupleElementInfo struct {
+	flags              checker.ElementFlags
+	labeledDeclaration *ast.Node
+}
+
+func tupleElementFlags(t *checker.Type) []checker.ElementFlags {
+	tt := t.TargetTupleType()
+	if tt == nil {
+		return nil
+	}
+	infos := (*extraTupleType)(unsafe.Pointer(tt)).elementInfos
+	out := make([]checker.ElementFlags, len(infos))
+	for i := range infos {
+		out[i] = (*extraTupleElementInfo)(unsafe.Pointer(&infos[i])).flags
+	}
+	return out
 }
 
 // modelTypeName: if t is a model's instance type, return "Name.Type"; else "".
