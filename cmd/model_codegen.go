@@ -313,6 +313,7 @@ func (g *modelGen) member(schemaType *checker.Type, key string, atNode *ast.Node
 	if len(props) == 0 {
 		return fmt.Sprintf("extends %s {}", g.typeStr(memberType, atNode)), nil
 	}
+	fieldSyms := g.structFieldSymbols(atNode)
 	lines := make([]string, 0, len(props))
 	for _, p := range props {
 		pt := g.ch.GetTypeOfSymbolAtLocation(p, atNode)
@@ -320,7 +321,14 @@ func (g *modelGen) member(schemaType *checker.Type, key string, atNode *ast.Node
 		if p.Flags&ast.SymbolFlagsOptional != 0 {
 			opt = "?"
 		}
-		lines = append(lines, fmt.Sprintf("    readonly %s%s: %s", propKey(p.Name), opt, g.print(pt, atNode, key)))
+		// An expand-y field (union / non-facade struct) backed by a named schema
+		// const -> reference it (`X.Encoded` / `typeof X.Encoded`) instead of
+		// inline-expanding.
+		val := g.fieldConstRef(fieldSyms, p.Name, pt, key)
+		if val == "" {
+			val = g.print(pt, atNode, key)
+		}
+		lines = append(lines, fmt.Sprintf("    readonly %s%s: %s", propKey(p.Name), opt, val))
 	}
 	return "{\n" + strings.Join(lines, "\n") + "\n  }", nil
 }
@@ -390,7 +398,10 @@ func (g *modelGen) print(t *checker.Type, atNode *ast.Node, side string) string 
 				}
 				parts[i] = fmt.Sprintf("readonly %s%s: %s", propKey(p.Name), opt, g.print(pt, atNode, side))
 			}
-			return "{ " + strings.Join(parts, "; ") + " }"
+			// Multi-line: a deeply-nested inline object on one line can reach 50KB+
+			// and crash the formatter; newline-separated members let it format. The
+			// whitespace-insensitive codegen compare keeps this stable vs dprint.
+			return "{\n" + strings.Join(parts, "\n") + "\n}"
 		}
 	}
 	// primitives, literals, branded scalars, named library types
@@ -436,17 +447,93 @@ func tupleElementFlags(t *checker.Type) []checker.ElementFlags {
 // Two shapes: Self = the class (symbol name == ModelName), or Self = `X.Type`
 // (symbol name == "Type", parent == ModelName).
 func (g *modelGen) modelTypeName(t *checker.Type) string {
-	sym := t.Symbol()
-	if sym == nil {
-		return ""
-	}
-	if sym.Name == "Type" && sym.Parent != nil {
-		if _, ok := g.wanted[sym.Parent.Name]; ok {
+	for _, sym := range []*ast.Symbol{aliasSymbolOf(t), t.Symbol()} {
+		if sym == nil {
+			continue
+		}
+		if sym.Name == "Type" && sym.Parent != nil && g.isModelParent(sym.Parent) {
 			return sym.Parent.Name + ".Type"
 		}
+		if _, ok := g.wanted[sym.Name]; ok {
+			return sym.Name + ".Type"
+		}
 	}
-	if _, ok := g.wanted[sym.Name]; ok {
-		return sym.Name + ".Type"
+	return ""
+}
+
+// structFieldSymbols maps each struct field that is a DIRECT named-schema
+// reference (`state: PickItemStateView`) to that schema's symbol, by walking the
+// `_X` declaration's source AST. This is robust to `.pipe(encodeKeys/…)`, which
+// strips the type-level `.fields`. Fields whose value is not a bare identifier
+// (scalars, `NullOr(X)`, `NonEmptyArray(X)`, …) are omitted -> they expand.
+func (g *modelGen) structFieldSymbols(nameNode *ast.Node) map[string]*ast.Symbol {
+	out := map[string]*ast.Symbol{}
+	nsym := g.ch.GetSymbolAtLocation(nameNode)
+	if nsym == nil || nsym.ValueDeclaration == nil {
+		return out
+	}
+	init := nsym.ValueDeclaration.Initializer()
+	if init == nil {
+		return out
+	}
+	var walk func(n *ast.Node)
+	walk = func(n *ast.Node) {
+		n.ForEachChild(func(c *ast.Node) bool {
+			if ast.IsPropertyAssignment(c) {
+				if nm, val := c.Name(), c.AsPropertyAssignment().Initializer; nm != nil && val != nil && ast.IsIdentifier(val) {
+					fn := nm.Text()
+					if _, exists := out[fn]; !exists {
+						if s := g.ch.GetSymbolAtLocation(val); s != nil {
+							out[fn] = checker.SkipAlias(s, g.ch)
+						}
+					}
+				}
+			}
+			walk(c)
+			return false
+		})
+	}
+	walk(init)
+	return out
+}
+
+// fieldConstRef: when a struct field's value would inline-expand (a union, or a
+// non-facade model's structural object) AND it's backed by a named schema const,
+// reference that const instead of expanding. Fallback chain (per `key`):
+//  1. `X.Encoded` / `X` -- when the declaration exists (`namespace X { type
+//     Encoded }` for Encoded, `type X` for Type),
+//  2. else `typeof X.Encoded` / `typeof X.Type` -- the const is a schema, so the
+//     query is valid and short,
+//  3. else "" -- no const name; caller expands (multi-line).
+func (g *modelGen) fieldConstRef(fieldSyms map[string]*ast.Symbol, prop string, computed *checker.Type, key string) string {
+	if computed.Flags()&checker.TypeFlagsUnion == 0 && !g.isAnonymousObject(computed) {
+		return ""
+	}
+	sym := fieldSyms[prop]
+	if sym == nil || sym.Name == "" || sym.Name[0] < 'A' || sym.Name[0] > 'Z' {
+		return ""
+	}
+	switch key {
+	case "Encoded":
+		if sym.Exports != nil {
+			if _, ok := sym.Exports["Encoded"]; ok {
+				return sym.Name + ".Encoded"
+			}
+		}
+		return "typeof " + sym.Name + ".Encoded"
+	case "Type":
+		if sym.Flags&ast.SymbolFlagsTypeAlias != 0 {
+			return sym.Name
+		}
+		return "typeof " + sym.Name + ".Type"
+	case "Make":
+		if sym.Exports != nil {
+			if _, ok := sym.Exports["Make"]; ok {
+				return sym.Name + ".Make"
+			}
+		}
+		// No namespace `Make` -> the schema's make-input, by indexed access.
+		return "typeof " + sym.Name + `["~type.make.in"]`
 	}
 	return ""
 }
@@ -504,6 +591,7 @@ func (g *modelGen) makeMember(schemaType *checker.Type, atNode *ast.Node) (strin
 	for _, p := range g.ch.GetPropertiesOfType(typeType) {
 		typeByName[p.Name] = p
 	}
+	fieldSyms := g.structFieldSymbols(atNode)
 
 	lines := make([]string, 0, len(makeProps))
 	for _, p := range makeProps {
@@ -515,8 +603,11 @@ func (g *modelGen) makeMember(schemaType *checker.Type, atNode *ast.Node) (strin
 		if s, ok := typeByName[p.Name]; ok {
 			source = s
 		}
-		printed := g.print(g.ch.GetTypeOfSymbolAtLocation(source, atNode), atNode, "Type")
-		value := strings.ReplaceAll(printed, ".Type", ".Make")
+		st := g.ch.GetTypeOfSymbolAtLocation(source, atNode)
+		value := g.fieldConstRef(fieldSyms, p.Name, st, "Make")
+		if value == "" {
+			value = strings.ReplaceAll(g.print(st, atNode, "Type"), ".Type", ".Make")
+		}
 		lines = append(lines, fmt.Sprintf("    readonly %s%s: %s", propKey(p.Name), opt, value))
 	}
 	body := "{\n" + strings.Join(lines, "\n") + "\n  }"
@@ -536,13 +627,36 @@ func (g *modelGen) serviceMember(schemaType *checker.Type, key string, atNode *a
 
 // modelEncodedName: if t is a model's `Encoded` namespace interface, return
 // "Name.Encoded"; else "".
-func (g *modelGen) modelEncodedName(t *checker.Type) string {
-	sym := t.Symbol()
-	if sym == nil || sym.Name != "Encoded" || sym.Parent == nil {
-		return ""
+// aliasSymbolOf returns the type's named-alias symbol (the `X` in `type X = …`),
+// if any. A union model's `X.Encoded`/`X.Type` are type aliases, so their name
+// lives here rather than on `t.Symbol()`.
+func aliasSymbolOf(t *checker.Type) *ast.Symbol {
+	if a := checker.Type_alias(t); a != nil {
+		return a.Symbol()
 	}
-	if _, ok := g.wanted[sym.Parent.Name]; ok {
-		return sym.Parent.Name + ".Encoded"
+	return nil
+}
+
+// isModelParent: a symbol that names a model the file can reference (`X.Encoded`
+// resolves) — one of this file's models, or any imported class/interface/namespace.
+func (g *modelGen) isModelParent(p *ast.Symbol) bool {
+	if _, ok := g.wanted[p.Name]; ok {
+		return true
+	}
+	const modelLike = ast.SymbolFlagsClass | ast.SymbolFlagsInterface | ast.SymbolFlagsValueModule | ast.SymbolFlagsNamespaceModule
+	return p.Flags&modelLike != 0
+}
+
+func (g *modelGen) modelEncodedName(t *checker.Type) string {
+	// Check the alias symbol first (union models expose `X.Encoded` as a type
+	// alias), then the plain symbol (struct models expose it as an interface).
+	for _, sym := range []*ast.Symbol{aliasSymbolOf(t), t.Symbol()} {
+		if sym == nil || sym.Name != "Encoded" || sym.Parent == nil {
+			continue
+		}
+		if g.isModelParent(sym.Parent) {
+			return sym.Parent.Name + ".Encoded"
+		}
 	}
 	return ""
 }
