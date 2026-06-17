@@ -8,7 +8,7 @@
   },
   "files": [
     "bin/tsgolint.js",
-    "bin/*.gz",
+    "bin/download.js",
     "cmd",
     "build.sh",
     "README.md"

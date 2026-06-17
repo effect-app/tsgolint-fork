@@ -24,12 +24,20 @@ project automatically gets it — `oxlint --type-aware` runs the fork, and
 resolves the **same** binary via `oxlint-tsgolint/bin/tsgolint.js`. One binary,
 both roles. No publish step.
 
-## Binaries
+## Binaries (fetch-on-install, nothing committed)
 
-Prebuilt per-platform binaries are committed **gzipped** (`bin/*.gz`, ~13 MB
-each). `bin/tsgolint.js` gunzips the current platform's binary next to the
-archive on first run (the extracted file is gitignored). Platforms:
-linux/darwin/win32 × x64/arm64.
+Prebuilt per-platform binaries are **not** committed. On first use,
+`bin/tsgolint.js` downloads the current platform's gzipped binary from the
+public release and caches it next to the shim (Node-only — no git-lfs, no curl):
+
+    https://github.com/effect-app/tsgolint-fork/releases/tag/tsgolint-fork-v0.23.0
+
+A locally-built `bin/*.gz` (from `build.sh`) is used if present, so offline/dev
+builds work without the download. Platforms: linux/darwin/win32 × x64/arm64.
+
+To cut a new release: `./build.sh --all` then
+`gh release create tsgolint-fork-vX.Y.Z bin/*.gz --repo effect-app/tsgolint-fork`
+and bump `RELEASE_TAG` in `bin/tsgolint.js`.
 
 ## Rebuilding
 
