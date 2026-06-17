@@ -469,10 +469,10 @@ func (g *modelGen) modelTypeName(t *checker.Type) string {
 func (g *modelGen) structFieldSymbols(nameNode *ast.Node) map[string]*ast.Symbol {
 	out := map[string]*ast.Symbol{}
 	nsym := g.ch.GetSymbolAtLocation(nameNode)
-	if nsym == nil || nsym.ValueDeclaration == nil {
+	if nsym == nil || nsym.ValueDeclaration == nil || !ast.IsVariableDeclaration(nsym.ValueDeclaration) {
 		return out
 	}
-	init := nsym.ValueDeclaration.Initializer()
+	init := nsym.ValueDeclaration.AsVariableDeclaration().Initializer
 	if init == nil {
 		return out
 	}
@@ -505,8 +505,26 @@ func (g *modelGen) structFieldSymbols(nameNode *ast.Node) map[string]*ast.Symbol
 //  2. else `typeof X.Encoded` / `typeof X.Type` -- the const is a schema, so the
 //     query is valid and short,
 //  3. else "" -- no const name; caller expands (multi-line).
+//
+// isBigExpansion: a type whose inline expansion would be large — an anonymous
+// object, or a union that contains one. Pure literal/scalar/named unions
+// (`"a" | "b"`, `CarrierError | LegacyError`) stay inline.
+func (g *modelGen) isBigExpansion(t *checker.Type) bool {
+	if g.isAnonymousObject(t) {
+		return true
+	}
+	if t.Flags()&checker.TypeFlagsUnion != 0 {
+		for _, m := range t.Types() {
+			if g.isAnonymousObject(m) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func (g *modelGen) fieldConstRef(fieldSyms map[string]*ast.Symbol, prop string, computed *checker.Type, key string) string {
-	if computed.Flags()&checker.TypeFlagsUnion == 0 && !g.isAnonymousObject(computed) {
+	if !g.isBigExpansion(computed) {
 		return ""
 	}
 	sym := fieldSyms[prop]
