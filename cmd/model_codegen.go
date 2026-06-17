@@ -164,14 +164,16 @@ type modelGen struct {
 }
 
 // typeStr prints a type with NoTruncation, scoped to `atNode` (the source file
-// node it will be emitted near). Passing the enclosing declaration -- NOT
-// UseFullyQualifiedType, which in typescript-go emits absolute `import("/abs")`
-// paths -- makes tsgo pick the cheapest name VALID IN THAT FILE: the bare
-// `NonNegativeNumber` when it's imported directly, else the namespace-qualified
-// `S.NonNegativeNumber`, else an `import("…")` form. So generated refs always
-// resolve in the target file.
+// node it will be emitted near), so tsgo picks a name VALID IN THAT FILE.
+//
+// `UseAliasDefinedOutsideCurrentScope` is the key flag: it lets tsgo resolve a
+// symbol through the file's imports -- a directly-imported type stays bare
+// (`NonNegativeNumber`), one reachable only via a namespace import becomes
+// `S.StringId`, matching what the author wrote and what compiles. We do NOT use
+// `UseFullyQualifiedType`, which in typescript-go emits absolute
+// `import("/abs/path")` forms (machine-specific, non-portable).
 func (g *modelGen) typeStr(t *checker.Type, atNode *ast.Node) string {
-	return g.ch.TypeToStringEx(t, atNode, checker.TypeFormatFlagsNoTruncation, nil)
+	return g.ch.TypeToStringEx(t, atNode, checker.TypeFormatFlagsNoTruncation|checker.TypeFormatFlagsUseAliasDefinedOutsideCurrentScope, nil)
 }
 
 func toSet(xs []string) map[string]struct{} {
