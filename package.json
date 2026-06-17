@@ -1,0 +1,16 @@
+{
+  "name": "oxlint-tsgolint",
+  "version": "0.23.0",
+  "description": "Forked oxlint-tsgolint: upstream type-aware linting (headless) + a `model-codegen` subcommand for effect-app model codegen. Drop-in replacement, wired via pnpm overrides.",
+  "license": "MIT",
+  "bin": {
+    "tsgolint": "./bin/tsgolint.js"
+  },
+  "files": [
+    "bin/tsgolint.js",
+    "bin/*.gz",
+    "cmd",
+    "build.sh",
+    "README.md"
+  ]
+}
