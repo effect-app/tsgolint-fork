@@ -163,14 +163,15 @@ type modelGen struct {
 	privateNames map[string]struct{}
 }
 
-// typeStr prints a type with NoTruncation. Note: unlike type-resolver.ts we do
-// NOT set UseFullyQualifiedType -- in typescript-go that flag emits absolute
-// `import("/abs/path").Name` forms rather than resolving the in-scope `S.` alias.
-// With nil enclosing, tsgo prints the named-import form (`NonNegativeNumber`),
-// which is valid in the target file (a type-equivalent divergence from the
-// classic resolver's namespace-qualified `S.NonNegativeNumber`).
-func (g *modelGen) typeStr(t *checker.Type) string {
-	return g.ch.TypeToStringEx(t, nil, checker.TypeFormatFlagsNoTruncation, nil)
+// typeStr prints a type with NoTruncation, scoped to `atNode` (the source file
+// node it will be emitted near). Passing the enclosing declaration -- NOT
+// UseFullyQualifiedType, which in typescript-go emits absolute `import("/abs")`
+// paths -- makes tsgo pick the cheapest name VALID IN THAT FILE: the bare
+// `NonNegativeNumber` when it's imported directly, else the namespace-qualified
+// `S.NonNegativeNumber`, else an `import("…")` form. So generated refs always
+// resolve in the target file.
+func (g *modelGen) typeStr(t *checker.Type, atNode *ast.Node) string {
+	return g.ch.TypeToStringEx(t, atNode, checker.TypeFormatFlagsNoTruncation, nil)
 }
 
 func toSet(xs []string) map[string]struct{} {
@@ -308,7 +309,7 @@ func (g *modelGen) member(schemaType *checker.Type, key string, atNode *ast.Node
 	memberType := g.ch.GetTypeOfSymbolAtLocation(memberSym, atNode)
 	props := g.ch.GetPropertiesOfType(memberType)
 	if len(props) == 0 {
-		return fmt.Sprintf("extends %s {}", g.typeStr(memberType)), nil
+		return fmt.Sprintf("extends %s {}", g.typeStr(memberType, atNode)), nil
 	}
 	lines := make([]string, 0, len(props))
 	for _, p := range props {
@@ -391,7 +392,7 @@ func (g *modelGen) print(t *checker.Type, atNode *ast.Node, side string) string 
 		}
 	}
 	// primitives, literals, branded scalars, named library types
-	printed := g.typeStr(t)
+	printed := g.typeStr(t, atNode)
 	if side == "Type" {
 		return namedScalar(printed)
 	}
@@ -494,7 +495,7 @@ func (g *modelGen) makeMember(schemaType *checker.Type, atNode *ast.Node) (strin
 
 	makeProps := g.ch.GetPropertiesOfType(makeType)
 	if len(makeProps) == 0 {
-		return "= " + g.typeStr(rawMakeType), nil
+		return "= " + g.typeStr(rawMakeType, atNode), nil
 	}
 
 	typeByName := make(map[string]*ast.Symbol, len(makeProps))
@@ -528,7 +529,7 @@ func (g *modelGen) serviceMember(schemaType *checker.Type, key string, atNode *a
 	if memberSym == nil {
 		return "", fmt.Errorf("no %s on schema type", key)
 	}
-	return g.typeStr(g.ch.GetTypeOfSymbolAtLocation(memberSym, atNode)), nil
+	return g.typeStr(g.ch.GetTypeOfSymbolAtLocation(memberSym, atNode), atNode), nil
 }
 
 // modelEncodedName: if t is a model's `Encoded` namespace interface, return
